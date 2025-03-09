@@ -13,6 +13,7 @@ private:
 public:
 	DataStore();
 	void init_insert(string key, string val);
-	vector<string> process_get(vector<string> batch);
+	vector<string> process_read(vector<string> batch);
+	void process_write(vector<pair<string, string>> batch);
 	void print_elements(); // for testing
 };

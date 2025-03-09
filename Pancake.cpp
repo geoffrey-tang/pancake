@@ -56,43 +56,113 @@ void Pancake::init(DataStore &d, Distribution &distro, double A, double D) {
 void Pancake::add_replicas(DataStore &d, const string& key, int num) {
     random_device rd;
     mt19937 gen(rd());
-    string value = to_string(gen());
+    string value; //= to_string(gen());
     for (int i = 0; i < num; i++) {
         string replica = key + to_string(i);
+        value = replica + "_value";
         d.init_insert(replica, value);
     }
 }
 
-vector<string> Pancake::create_secure_access_batch(DataStore& d, string query, int B) {
+vector<string> Pancake::create_secure_read_batch(DataStore& d, string query, int B) {
     random_device rd;
     mt19937 gen(rd());
     bernoulli_distribution coin(1.0 / (2 * real_key_freq.size() * alpha)); //true = real query, false = fake query
+    client_pos.clear();
     vector<string> batch;
-    query_queue.push(query + to_string(gen() % (int)key_replica_num[query]));
+    if (!query.empty()) {
+        query_queue.push(make_pair(query, to_string(gen() % (int)key_replica_num[query])));
+    }
     //cout << query_queue.front() << endl;
     string k;
+    string r;
     for (int i = 0; i < B; i++) {
         if (coin(gen)) {
             //cout << "real flipped; ";
             if (!query_queue.empty()) {
                 //cout << "added query" << endl;
-                batch.push_back(query_queue.front());
+                batch.push_back(query_queue.front().first + query_queue.front().second);
+                sent_batch.push_back(make_pair(query_queue.front().first, query_queue.front().second));
+                client_pos.push_back(i);
                 query_queue.pop();
             }
             else {
                 //cout << "added real dist" << endl;
                 k = dist.choose_sample();
-                batch.push_back(k + to_string(gen() % (int)key_replica_num[k]));
+                r = to_string(gen() % (int)key_replica_num[k]);
+                batch.push_back(k + r);
+                sent_batch.push_back(make_pair(k, r));
             }
         }
         else {
             //cout << "fake flipped; ";
             k = fake_dist.choose_sample();
             //cout << "added " << k << endl;
-            batch.push_back(k + to_string(gen() % (int)key_replica_num[k]));
+            r = to_string(gen() % (int)key_replica_num[k]);
+            batch.push_back(k + r);
+            sent_batch.push_back(make_pair(k, r));
         }
     }
     return batch;
+}
+
+bool Pancake::check_update(const string& key, int repl_num) {
+    if (updates.count(key) > 0)
+        return updates[key].second[repl_num];
+    else
+        return true;
+}
+
+vector<pair<string, string>> Pancake::create_secure_write_batch(DataStore& d, vector<string> vals) {
+    vector<pair<string, string>> batch;
+    for (int i = 0; i < sent_batch.size(); i++) {
+        //cout << sent_batch[i].first + sent_batch[i].second << endl;
+        if (!check_update(sent_batch[i].first, stoi(sent_batch[i].second))) {
+            batch.push_back(make_pair(sent_batch[i].first + sent_batch[i].second, updates[sent_batch[i].first].first));
+        }
+        else {
+            batch.push_back(make_pair(sent_batch[i].first + sent_batch[i].second, vals[i]));
+        }
+    }
+    for(auto i : client_pos) {
+        cout << "READ: {" << batch[i].first << ", " << batch[i].second << "}" << endl;
+    }
+    sent_batch.clear();
+    return batch;
+}
+
+void Pancake::access(DataStore &d, char query_type, string key, string val, int B) {
+    vector<string> read_batch;
+    vector<string> read_return;
+    vector<pair<string, string>> write_batch;
+    cout << "QUERY: " << query_type << endl;
+    if (query_type == 'R') {
+        read_batch = create_secure_read_batch(d, key, B);
+        read_return = d.process_read(read_batch);
+        write_batch = create_secure_write_batch(d, read_return);
+        d.process_write(write_batch);
+    }
+    else if (query_type == 'W') {
+        vector<bool> updated(key_replica_num[key], false);
+        updates[key] = make_pair(val, updated);
+        read_batch = create_secure_read_batch(d, "", B);
+        read_return = d.process_read(read_batch);
+        write_batch = create_secure_write_batch(d, read_return);
+        d.process_write(write_batch);
+    }
+    /*cout << "READ_BATCH: ";
+    for (auto i : read_batch) {
+        cout << i << " ";
+    }
+    cout << endl << "READ_RETURN: ";
+    for (auto i : read_return) {
+        cout << i << " ";
+    }
+    cout << endl << "WRITE_BATCH: ";
+    for (auto i : write_batch) {
+        cout << "{" << i.first << ", " << i.second << "} ";
+    }
+    cout << endl << "--------------------------------" << endl;;*/
 }
 
 int main() {
@@ -109,17 +179,24 @@ int main() {
     for (auto i : distribution.get_weights()) {
         cout << i << " ";
     }
-    cout << endl << "Batch" << endl;
-    vector<string> sent = pancake.create_secure_access_batch(data, "a", 10);
-    map<string, int> m;
+    cout << endl << "================================================" << endl;
+    pancake.access(data, 'R', "a", "", 5);
+    pancake.access(data, 'W', "a", "new value!", 5);
+    pancake.access(data, 'R', "a", "", 5);
+    pancake.access(data, 'W', "b", "a different value", 5);
+    pancake.access(data, 'R', "b", "", 5);
+    pancake.access(data, 'R', "c", "", 5);
+    /*map<string, int> m;
     for (auto i : sent) {
         ++m[i];
         cout << i << endl;
     }
     for (auto i : m)
         cout << i.first << " appeared " << i.second << " times" << endl;
-    vector<string> recv = data.process_get(sent);
+    vector<string> recv = data.process_read(sent);
     cout << "Return" << endl;
     for (auto i : recv)
-        cout << i << endl;
+        cout << i << endl;*/
+    cout << endl << "================================================" << endl;
+    data.print_elements();
 }
